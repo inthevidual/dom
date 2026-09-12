@@ -18,7 +18,7 @@
   h1 { font-size: 2.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
   h1 span { color: var(--accent); }
   p.lead { margin: 0 0 1.5rem; color: var(--muted); }
-  #drop { border: 2px dashed var(--line); border-radius: 12px; padding: 2.5rem 1rem; text-align: center; background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s; }
+  #drop { border: 2px dashed var(--line); border-radius: 12px; padding: 2.5rem 1rem; text-align: center; background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s; display: block; }
   #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
   #drop strong { display: block; font-size: 1.1rem; margin-bottom: .25rem; }
   #drop small { color: var(--muted); }
@@ -27,7 +27,7 @@
   #status.warn { color: var(--warn); }
   #status.ok { color: var(--ok); }
   #result { display: none; }
-  .actions { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1rem 0; }
+  .actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
   .btn { appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: .55rem 1rem; border-radius: 8px; font: inherit; cursor: pointer; text-decoration: none; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .stats { color: var(--muted); font-size: .9rem; }
@@ -40,7 +40,7 @@
 <body>
 <main>
   <h1><span>dom</span></h1>
-  <p class="lead">Släpp en fil (.docx, .doc, .txt, .md). Alla <em>de</em>/<em>dem</em> blir <em>dom</em>, alla styckebrytningar tas bort utom den efter »nu kör vi».</p>
+  <p class="lead">Släpp en fil (.docx, .doc, .txt, .md). Alla <em>de</em>/<em>dem</em> blir <em>dom</em>, alla styckebrytningar tas bort utom den efter »nu kör vi». Radbrytningar behålls. Du får en .docx tillbaka.</p>
 
   <label id="drop" for="file">
     <strong>Släpp fil här eller klicka för att välja</strong>
@@ -52,7 +52,7 @@
 
   <section id="result">
     <div class="actions">
-      <a class="btn primary" id="download" download>Ladda ner</a>
+      <a class="btn primary" id="download" download>Ladda ner .docx</a>
       <button class="btn" id="copy" type="button">Kopiera text</button>
       <span class="stats" id="stats"></span>
     </div>
@@ -61,12 +61,13 @@
 
   <details>
     <summary>Hur det funkar</summary>
-    <p>Allt sker i din webbläsare – inget laddas upp. <code>de</code>, <code>De</code>, <code>DE</code>, <code>dem</code>, <code>Dem</code>, <code>DEM</code> ersätts med <code>dom</code>/<code>Dom</code>/<code>DOM</code> som hela ord. Styckebrytningar ersätts med mellanslag; det stycke som slutar med »nu kör vi» följs av ett radbryt. Om frasen förekommer mitt i ett stycke sätts radbrytet direkt efter frasen.</p>
-    <p>.docx läses med mammoth.js. Gamla binära .doc-filer (Word 97–2003) läses med en enkel heuristik som kan missa text – spara om som .docx för säkert resultat.</p>
+    <p>Allt sker i din webbläsare – inget laddas upp. <code>de</code>, <code>De</code>, <code>DE</code>, <code>dem</code>, <code>Dem</code>, <code>DEM</code> ersätts med <code>dom</code>/<code>Dom</code>/<code>DOM</code> som hela ord.</p>
+    <p><strong>Styckebrytningar</strong> (Enter i Word, tom rad i .txt/.md) slås ihop med mellanslag. Det stycke som slutar med »nu kör vi» får behålla sin styckebrytning; förekommer frasen mitt i ett stycke sätts brytningen direkt efter frasen. <strong>Radbrytningar</strong> (Skift+Enter i Word, enkel ny rad i .txt/.md) behålls som de är.</p>
+    <p>.docx läses direkt ur dokumentets XML (text, radbryt, tabbar; formatering, tabeller och sidhuvud ignoreras). Gamla binära .doc-filer (Word 97–2003) läses med en enkel heuristik som kan missa text – spara om som .docx för säkert resultat. Resultatet skrivs som en enkel .docx utan formatering.</p>
   </details>
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
 (function () {
   'use strict';
@@ -82,6 +83,8 @@
   var lastUrl = null;
 
   // ---------- text transforms ----------
+  // Text model: "\n\n" = paragraph break, "\n" = line break (mammoth's raw-text
+  // convention, and the natural reading of .txt/.md).
 
   // Whole-word de/dem -> dom, preserving case shape.
   var DE_RE = /(?<![\p{L}\p{N}_])(de|dem)(?![\p{L}\p{N}_])/giu;
@@ -96,42 +99,114 @@
   var PHRASE_TAIL = /nu\s+kör\s+vi[\s.!?…:;,"'”’»)\]]*$/iu;
   var PHRASE_INLINE = /nu\s+kör\s+vi[.!?…:;,"'”’»)\]]*/iu;
 
-  // Collapse paragraphs into one line; keep a single \n after "nu kör vi".
+  // Split into paragraphs (arrays of lines), drop paragraph breaks, keep line
+  // breaks. Returns { paras: [[line, ...], ...], placed }.
   function compact(text) {
     var paras = text
       .replace(/\r\n?/g, '\n')
-      .split(/\n+/)
-      .map(function (p) { return p.replace(/\s+/g, ' ').trim(); })
-      .filter(Boolean);
+      .split(/\n[ \t]*\n+/)
+      .map(function (p) {
+        return p.split('\n')
+          .map(function (l) { return l.replace(/[ \t ]+/g, ' ').trim(); })
+          .filter(Boolean);
+      })
+      .filter(function (p) { return p.length; });
 
-    var outStr = '';
+    var outParas = [];
+    var cur = [];      // lines of the paragraph being assembled
     var placed = false;
+
+    function appendPara(lines) {
+      if (!cur.length) { cur = lines.slice(); return; }
+      // Join: last line of cur + ' ' + first line of incoming; other lines follow.
+      cur[cur.length - 1] += ' ' + lines[0];
+      for (var k = 1; k < lines.length; k++) cur.push(lines[k]);
+    }
+
     for (var i = 0; i < paras.length; i++) {
       var p = paras[i];
-      if (outStr) outStr += (outStr.slice(-1) === '\n') ? '' : ' ';
-      outStr += p;
-      if (!placed && PHRASE_TAIL.test(p) && i < paras.length - 1) {
-        outStr += '\n';
+      appendPara(p);
+      if (!placed && PHRASE_TAIL.test(p[p.length - 1]) && i < paras.length - 1) {
+        outParas.push(cur);
+        cur = [];
         placed = true;
       }
     }
-    outStr = outStr.replace(/ \n/g, '\n').replace(/\n /g, '\n');
+    if (cur.length) outParas.push(cur);
 
-    if (!placed) {
-      var m = PHRASE_INLINE.exec(outStr);
-      if (m) {
-        var at = m.index + m[0].length;
-        outStr = outStr.slice(0, at).replace(/ +$/, '') + '\n' + outStr.slice(at).replace(/^ +/, '');
-        placed = true;
+    // Phrase never ended a paragraph: split the (single) paragraph at the
+    // first inline occurrence instead.
+    if (!placed && outParas.length === 1) {
+      var lines = outParas[0];
+      for (var li = 0; li < lines.length; li++) {
+        var m = PHRASE_INLINE.exec(lines[li]);
+        if (m) {
+          var at = m.index + m[0].length;
+          var head = lines[li].slice(0, at).replace(/ +$/, '');
+          var tail = lines[li].slice(at).replace(/^ +/, '');
+          var first = lines.slice(0, li).concat([head]);
+          var second = (tail ? [tail] : []).concat(lines.slice(li + 1));
+          outParas = second.length ? [first, second] : [first];
+          placed = true;
+          break;
+        }
       }
     }
-    return { text: outStr.trim(), placed: placed };
+    return { paras: outParas, placed: placed };
   }
 
   function process(text) {
-    var c = compact(text);
-    var before = (text.match(DE_RE) || []).length;
-    return { text: deToDom(c.text), placed: c.placed, replaced: before };
+    var replaced = (text.match(DE_RE) || []).length;
+    var c = compact(deToDom(text));
+    return { paras: c.paras, placed: c.placed, replaced: replaced };
+  }
+
+  function toPlain(paras) {
+    return paras.map(function (p) { return p.join('\n'); }).join('\n\n');
+  }
+
+  // ---------- docx writer (minimal OOXML package via JSZip) ----------
+
+  function xmlEsc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function docxBlob(paras) {
+    var body = paras.map(function (lines) {
+      var runs = lines.map(function (l) {
+        return '<w:t xml:space="preserve">' + xmlEsc(l) + '</w:t>';
+      }).join('<w:br/>');
+      return '<w:p><w:r>' + runs + '</w:r></w:p>';
+    }).join('');
+
+    var document =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:body>' + body + '<w:sectPr/></w:body></w:document>';
+
+    var contentTypes =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>';
+
+    var rels =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '</Relationships>';
+
+    var zip = new JSZip();
+    zip.file('[Content_Types].xml', contentTypes);
+    zip.file('_rels/.rels', rels);
+    zip.file('word/document.xml', document);
+    return zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      compression: 'DEFLATE'
+    });
   }
 
   // ---------- file readers ----------
@@ -140,31 +215,63 @@
     return file.text();
   }
 
+  // Read word/document.xml straight from the zip: <w:p> -> paragraph,
+  // <w:br/> / <w:cr/> -> line break, <w:tab/> -> tab. (mammoth's raw-text
+  // export drops <w:br/>, which is exactly what we need to keep.)
   function readDocx(file) {
-    return file.arrayBuffer().then(function (buf) {
-      return mammoth.extractRawText({ arrayBuffer: buf });
-    }).then(function (r) { return r.value; });
+    return JSZip.loadAsync(file).then(function (zip) {
+      var doc = zip.file('word/document.xml');
+      if (!doc) throw new Error('Ingen word/document.xml i filen – är det verkligen en .docx?');
+      return doc.async('string');
+    }).then(parseDocumentXml);
   }
 
-  // Best-effort for Word 97-2003 binary .doc: try to find the text stream.
-  // Text is stored as UTF-16LE or cp1252 in the WordDocument stream; we scan
-  // both decodings for runs of readable characters and pick the richer one.
+  function xmlUnesc(s) {
+    return s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, function (_, e) {
+      if (e[0] === '#') return String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+      return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e.toLowerCase()];
+    });
+  }
+
+  function parseDocumentXml(xml) {
+    var paras = [];
+    var cur = null;
+    var tok = /<w:p[\s>]|<\/w:p>|<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>|<w:t(?:\s[^>]*)?\/>|<w:br(\s[^>]*)?\/>|<w:cr\/>|<w:tab\/>/g;
+    var m;
+    while ((m = tok.exec(xml)) !== null) {
+      var t = m[0];
+      if (t.charAt(1) === '/') {                       // </w:p>
+        if (cur !== null) paras.push(cur);
+        cur = null;
+      } else if (t.slice(0, 4) === '<w:p') {           // <w:p ...>
+        if (cur !== null) paras.push(cur);
+        cur = '';
+      } else if (cur === null) {
+        continue;                                      // text outside a paragraph (headers etc.)
+      } else if (m[1] !== undefined) {                 // <w:t>…</w:t>
+        cur += xmlUnesc(m[1]);
+      } else if (t.slice(0, 5) === '<w:br') {          // <w:br/> or <w:br w:type="page"/>
+        if (/w:type="(page|column)"/.test(m[2] || '')) { paras.push(cur); cur = ''; }
+        else cur += '\n';
+      } else if (t === '<w:cr/>') {
+        cur += '\n';
+      } else if (t === '<w:tab/>') {
+        cur += '\t';
+      }
+    }
+    if (cur !== null) paras.push(cur);
+    return paras.join('\n\n');
+  }
+
+  // Best-effort for Word 97-2003 binary .doc: scan the file for runs of
+  // readable text in UTF-16LE and cp1252 and keep the richer decoding.
+  // In the binary text stream \r ends a paragraph and  is a line break.
   function readDocLegacy(file) {
     return file.arrayBuffer().then(function (buf) {
       var bytes = new Uint8Array(buf);
       var candidates = [];
-
-      // UTF-16LE runs
-      try {
-        var u16 = new TextDecoder('utf-16le').decode(bytes);
-        candidates.push(extractRuns(u16, 20));
-      } catch (e) {}
-      // cp1252 (windows-1252) runs
-      try {
-        var w = new TextDecoder('windows-1252').decode(bytes);
-        candidates.push(extractRuns(w, 40));
-      } catch (e) {}
-
+      try { candidates.push(extractRuns(new TextDecoder('utf-16le').decode(bytes), 20)); } catch (e) {}
+      try { candidates.push(extractRuns(new TextDecoder('windows-1252').decode(bytes), 40)); } catch (e) {}
       candidates.sort(function (a, b) { return b.length - a.length; });
       var best = candidates[0] || '';
       if (best.length < 20) throw new Error('Kunde inte hitta läsbar text i .doc-filen. Spara om som .docx.');
@@ -173,15 +280,13 @@
   }
 
   function extractRuns(s, minLen) {
-    // Word stores paragraph ends as \r (0x0D) in the text stream.
-    var re = new RegExp('[\\p{L}\\p{N}\\p{P}\\p{Zs}\\r\\t]{' + minLen + ',}', 'gu');
+    var re = new RegExp('[\\p{L}\\p{N}\\p{P}\\p{Zs}\\r\\t\\u000b]{' + minLen + ',}', 'gu');
     var runs = s.match(re) || [];
-    // Drop runs that are mostly non-letters (font tables, style names, etc.)
     runs = runs.filter(function (r) {
       var letters = (r.match(/\p{L}/gu) || []).length;
       return letters / r.length > 0.5 && /\s/.test(r);
     });
-    return runs.join('\n').replace(/\r/g, '\n');
+    return runs.join('\r').replace(//g, '\n').replace(/\r/g, '\n\n');
   }
 
   // ---------- UI ----------
@@ -209,22 +314,27 @@
     setStatus('Bearbetar ' + file.name + '…');
     result.style.display = 'none';
 
+    var r;
     reader(file).then(function (raw) {
-      var r = process(raw || '');
-      if (!r.text) throw new Error('Filen verkar vara tom.');
-      out.value = r.text;
+      r = process(raw || '');
+      if (!r.paras.length) throw new Error('Filen verkar vara tom.');
+      return docxBlob(r.paras);
+    }).then(function (blob) {
+      var plain = toPlain(r.paras);
+      out.value = plain;
 
       if (lastUrl) URL.revokeObjectURL(lastUrl);
-      var blob = new Blob([r.text], { type: 'text/plain;charset=utf-8' });
       lastUrl = URL.createObjectURL(blob);
       dl.href = lastUrl;
-      dl.download = baseName(file.name) + '-dom.txt';
+      dl.download = baseName(file.name) + '-dom.docx';
 
-      stats.textContent = r.replaced + ' de/dem → dom · ' + r.text.length + ' tecken';
+      var lineBreaks = r.paras.reduce(function (n, p) { return n + p.length - 1; }, 0);
+      stats.textContent = r.replaced + ' de/dem → dom · ' + r.paras.length + ' stycke' + (r.paras.length === 1 ? '' : 'n') +
+        ' · ' + lineBreaks + ' radbryt · ' + plain.length + ' tecken';
       result.style.display = 'block';
 
       if (r.placed) setStatus('Klart' + note + '.', note ? 'warn' : 'ok');
-      else setStatus('Klart' + note + '. Obs: »nu kör vi» hittades inte – inget radbryt behölls.', 'warn');
+      else setStatus('Klart' + note + '. Obs: »nu kör vi» hittades inte – allt blev ett stycke.', 'warn');
     }).catch(function (err) {
       console.error(err);
       setStatus('Fel: ' + (err && err.message ? err.message : err), 'warn');
