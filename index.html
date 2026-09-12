@@ -174,8 +174,7 @@
 
   function extractRuns(s, minLen) {
     // Word stores paragraph ends as \r (0x0D) in the text stream.
-    var re = /[\p{L}\p{N}\p{P}\p{Zs}\r\t]{MIN,}/gu;
-    re = new RegExp(re.source.replace('MIN', String(minLen)), 'gu');
+    var re = new RegExp('[\\p{L}\\p{N}\\p{P}\\p{Zs}\\r\\t]{' + minLen + ',}', 'gu');
     var runs = s.match(re) || [];
     // Drop runs that are mostly non-letters (font tables, style names, etc.)
     runs = runs.filter(function (r) {
