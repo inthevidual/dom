@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dom</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --fg: #1a1a1a; --muted: #6b6b6b; --line: #d8d6d0;
+    --accent: #0072ce; --panel: #fff; --ok: #1f7a3a; --warn: #a15c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141414; --fg: #ececec; --muted: #9a9a9a; --line: #333; --panel: #1e1e1e; --accent: #5aa9ff; --ok: #5ccf7d; --warn: #f0b35a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 2rem 1rem 4rem; }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 2.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+  h1 span { color: var(--accent); }
+  p.lead { margin: 0 0 1.5rem; color: var(--muted); }
+  #drop { border: 2px dashed var(--line); border-radius: 12px; padding: 2.5rem 1rem; text-align: center; background: var(--panel); cursor: pointer; transition: border-color .15s, background .15s; }
+  #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+  #drop strong { display: block; font-size: 1.1rem; margin-bottom: .25rem; }
+  #drop small { color: var(--muted); }
+  input[type=file] { display: none; }
+  #status { margin: 1rem 0; min-height: 1.5em; color: var(--muted); }
+  #status.warn { color: var(--warn); }
+  #status.ok { color: var(--ok); }
+  #result { display: none; }
+  .actions { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1rem 0; }
+  .btn { appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: .55rem 1rem; border-radius: 8px; font: inherit; cursor: pointer; text-decoration: none; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .stats { color: var(--muted); font-size: .9rem; }
+  textarea { width: 100%; min-height: 18rem; padding: .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; white-space: pre-wrap; }
+  details { margin-top: 2rem; color: var(--muted); font-size: .9rem; }
+  summary { cursor: pointer; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span>dom</span></h1>
+  <p class="lead">Släpp en fil (.docx, .doc, .txt, .md). Alla <em>de</em>/<em>dem</em> blir <em>dom</em>, alla styckebrytningar tas bort utom den efter »nu kör vi».</p>
+
+  <label id="drop" for="file">
+    <strong>Släpp fil här eller klicka för att välja</strong>
+    <small>.docx · .doc · .txt · .md</small>
+    <input type="file" id="file" accept=".docx,.doc,.txt,.md,text/plain,text/markdown,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+  </label>
+
+  <div id="status"></div>
+
+  <section id="result">
+    <div class="actions">
+      <a class="btn primary" id="download" download>Ladda ner</a>
+      <button class="btn" id="copy" type="button">Kopiera text</button>
+      <span class="stats" id="stats"></span>
+    </div>
+    <textarea id="out" readonly spellcheck="false"></textarea>
+  </section>
+
+  <details>
+    <summary>Hur det funkar</summary>
+    <p>Allt sker i din webbläsare – inget laddas upp. <code>de</code>, <code>De</code>, <code>DE</code>, <code>dem</code>, <code>Dem</code>, <code>DEM</code> ersätts med <code>dom</code>/<code>Dom</code>/<code>DOM</code> som hela ord. Styckebrytningar ersätts med mellanslag; det stycke som slutar med »nu kör vi» följs av ett radbryt. Om frasen förekommer mitt i ett stycke sätts radbrytet direkt efter frasen.</p>
+    <p>.docx läses med mammoth.js. Gamla binära .doc-filer (Word 97–2003) läses med en enkel heuristik som kan missa text – spara om som .docx för säkert resultat.</p>
+  </details>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var drop = document.getElementById('drop');
+  var input = document.getElementById('file');
+  var status = document.getElementById('status');
+  var result = document.getElementById('result');
+  var out = document.getElementById('out');
+  var dl = document.getElementById('download');
+  var copyBtn = document.getElementById('copy');
+  var stats = document.getElementById('stats');
+  var lastUrl = null;
+
+  // ---------- text transforms ----------
+
+  // Whole-word de/dem -> dom, preserving case shape.
+  var DE_RE = /(?<![\p{L}\p{N}_])(de|dem)(?![\p{L}\p{N}_])/giu;
+  function deToDom(text) {
+    return text.replace(DE_RE, function (m) {
+      if (m === m.toUpperCase()) return 'DOM';
+      if (m[0] === m[0].toUpperCase()) return 'Dom';
+      return 'dom';
+    });
+  }
+
+  var PHRASE_TAIL = /nu\s+kör\s+vi[\s.!?…:;,"'”’»)\]]*$/iu;
+  var PHRASE_INLINE = /nu\s+kör\s+vi[.!?…:;,"'”’»)\]]*/iu;
+
+  // Collapse paragraphs into one line; keep a single \n after "nu kör vi".
+  function compact(text) {
+    var paras = text
+      .replace(/\r\n?/g, '\n')
+      .split(/\n+/)
+      .map(function (p) { return p.replace(/\s+/g, ' ').trim(); })
+      .filter(Boolean);
+
+    var outStr = '';
+    var placed = false;
+    for (var i = 0; i < paras.length; i++) {
+      var p = paras[i];
+      if (outStr) outStr += (outStr.slice(-1) === '\n') ? '' : ' ';
+      outStr += p;
+      if (!placed && PHRASE_TAIL.test(p) && i < paras.length - 1) {
+        outStr += '\n';
+        placed = true;
+      }
+    }
+    outStr = outStr.replace(/ \n/g, '\n').replace(/\n /g, '\n');
+
+    if (!placed) {
+      var m = PHRASE_INLINE.exec(outStr);
+      if (m) {
+        var at = m.index + m[0].length;
+        outStr = outStr.slice(0, at).replace(/ +$/, '') + '\n' + outStr.slice(at).replace(/^ +/, '');
+        placed = true;
+      }
+    }
+    return { text: outStr.trim(), placed: placed };
+  }
+
+  function process(text) {
+    var c = compact(text);
+    var before = (text.match(DE_RE) || []).length;
+    return { text: deToDom(c.text), placed: c.placed, replaced: before };
+  }
+
+  // ---------- file readers ----------
+
+  function readText(file) {
+    return file.text();
+  }
+
+  function readDocx(file) {
+    return file.arrayBuffer().then(function (buf) {
+      return mammoth.extractRawText({ arrayBuffer: buf });
+    }).then(function (r) { return r.value; });
+  }
+
+  // Best-effort for Word 97-2003 binary .doc: try to find the text stream.
+  // Text is stored as UTF-16LE or cp1252 in the WordDocument stream; we scan
+  // both decodings for runs of readable characters and pick the richer one.
+  function readDocLegacy(file) {
+    return file.arrayBuffer().then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      var candidates = [];
+
+      // UTF-16LE runs
+      try {
+        var u16 = new TextDecoder('utf-16le').decode(bytes);
+        candidates.push(extractRuns(u16, 20));
+      } catch (e) {}
+      // cp1252 (windows-1252) runs
+      try {
+        var w = new TextDecoder('windows-1252').decode(bytes);
+        candidates.push(extractRuns(w, 40));
+      } catch (e) {}
+
+      candidates.sort(function (a, b) { return b.length - a.length; });
+      var best = candidates[0] || '';
+      if (best.length < 20) throw new Error('Kunde inte hitta läsbar text i .doc-filen. Spara om som .docx.');
+      return best;
+    });
+  }
+
+  function extractRuns(s, minLen) {
+    // Word stores paragraph ends as \r (0x0D) in the text stream.
+    var re = /[\p{L}\p{N}\p{P}\p{Zs}\r\t]{MIN,}/gu;
+    re = new RegExp(re.source.replace('MIN', String(minLen)), 'gu');
+    var runs = s.match(re) || [];
+    // Drop runs that are mostly non-letters (font tables, style names, etc.)
+    runs = runs.filter(function (r) {
+      var letters = (r.match(/\p{L}/gu) || []).length;
+      return letters / r.length > 0.5 && /\s/.test(r);
+    });
+    return runs.join('\n').replace(/\r/g, '\n');
+  }
+
+  // ---------- UI ----------
+
+  function setStatus(msg, cls) {
+    status.textContent = msg;
+    status.className = cls || '';
+  }
+
+  function baseName(name) {
+    return name.replace(/\.[^.]+$/, '');
+  }
+
+  function handle(file) {
+    if (!file) return;
+    var ext = (file.name.split('.').pop() || '').toLowerCase();
+    var reader;
+    var note = '';
+    if (ext === 'docx') reader = readDocx;
+    else if (ext === 'doc') { reader = readDocLegacy; note = ' (heuristisk .doc-läsning – kontrollera resultatet)'; }
+    else if (ext === 'txt' || ext === 'md') reader = readText;
+    else if (file.type && file.type.indexOf('text/') === 0) reader = readText;
+    else { setStatus('Filtypen stöds inte: .' + ext, 'warn'); return; }
+
+    setStatus('Bearbetar ' + file.name + '…');
+    result.style.display = 'none';
+
+    reader(file).then(function (raw) {
+      var r = process(raw || '');
+      if (!r.text) throw new Error('Filen verkar vara tom.');
+      out.value = r.text;
+
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      var blob = new Blob([r.text], { type: 'text/plain;charset=utf-8' });
+      lastUrl = URL.createObjectURL(blob);
+      dl.href = lastUrl;
+      dl.download = baseName(file.name) + '-dom.txt';
+
+      stats.textContent = r.replaced + ' de/dem → dom · ' + r.text.length + ' tecken';
+      result.style.display = 'block';
+
+      if (r.placed) setStatus('Klart' + note + '.', note ? 'warn' : 'ok');
+      else setStatus('Klart' + note + '. Obs: »nu kör vi» hittades inte – inget radbryt behölls.', 'warn');
+    }).catch(function (err) {
+      console.error(err);
+      setStatus('Fel: ' + (err && err.message ? err.message : err), 'warn');
+    });
+  }
+
+  input.addEventListener('change', function () { handle(input.files[0]); input.value = ''; });
+
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    handle(f);
+  });
+  document.addEventListener('paste', function (e) {
+    var t = e.clipboardData && e.clipboardData.getData('text/plain');
+    if (t && t.trim()) handle(new File([t], 'urklipp.txt', { type: 'text/plain' }));
+  });
+
+  copyBtn.addEventListener('click', function () {
+    navigator.clipboard.writeText(out.value).then(function () {
+      copyBtn.textContent = 'Kopierat';
+      setTimeout(function () { copyBtn.textContent = 'Kopiera text'; }, 1500);
+    });
+  });
+})();
+</script>
+</body>
+</html>
